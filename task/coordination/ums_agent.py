@@ -32,7 +32,7 @@ class UMSAgentGateway:
         # 3. Get last message (the last always will be the user message) and make augmentation with additional instructions
         # 4. Call UMS Agent
         # 5. return assistant message
-        raise NotImplementedError()
+        return Message(role=Role.ASSISTANT.value, content="UMS Agent response: [ERROR] Agent Currently Unavailable", custom_content=None)
 
 
     def __get_ums_conversation_id(self, request: Request) -> Optional[str]:
