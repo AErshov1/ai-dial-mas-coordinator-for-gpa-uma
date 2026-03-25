@@ -36,13 +36,16 @@ class MASCoordinator:
         req_json = json.dumps(req.model_dump())
         print("Generated coordination request: ", req_json)
         stage.append_content(f"```json\n{req_json}\n```\n\n")
+        StageProcessor.close_stage_safely(stage)
 
+        stage = StageProcessor().open_stage(choice=choice, name=f"{req.agent_name}_agent")
         resp = await self.__handle_coordination_request(
             coordination_request=req,
             choice=choice,
             stage=stage,
             request=request
             )
+        StageProcessor.close_stage_safely(stage)
 
         final_resp = await self.__final_response(
             client=dial,
@@ -53,7 +56,6 @@ class MASCoordinator:
 
         print("=> Final response: ", final_resp.content)
 
-        StageProcessor.close_stage_safely(stage)
         return final_resp
 
 

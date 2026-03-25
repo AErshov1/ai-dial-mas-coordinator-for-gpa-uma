@@ -23,7 +23,6 @@ class GPAGateway:
             request: Request,
             additional_instructions: Optional[str]
     ) -> Message:
-        #TODO:
         # ℹ️ Cool thing about DIAL that all the apps that implement /chat/completions endpoint within DIAL infrastructure
         #    can be openai compatible and DIAL SDK supports us with creation of such applications. So, we can use any
         #    OpenAI compatible client (from openai, azureopenai, langchain, whatever...) and communicate with it like
@@ -66,10 +65,70 @@ class GPAGateway:
         # 6. Now we need to to save information about conversation with GPA to the MASCoordinator choice state. Create
         #    dict {_IS_GPA: True, GPA_MESSAGES: result_custom_content.state} and set it to the choice state.
         # 7. Return assistant message with content
-        raise NotImplementedError()
+        client = AsyncDial(base_url=self.endpoint, api_key=request.api_key, api_version='2025-01-01-preview')
+        chunks = await client.chat.completions.create(
+            messages=self.__prepare_gpa_messages(request, additional_instructions),
+            deployment_name="general-purpose-agent",
+            extra_headers={
+                'x-conversation-id': request.headers.get('x-conversation-id'),
+            },
+            stream=True,
+        )
+
+        content = ''
+        result_custom_content = CustomContent(attachments=[])
+        stages: dict[int, Stage] = {}
+        async for chunk in chunks:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    stage.append_content(delta.content)
+                    content += delta.content
+                if custom_content := delta.custom_content:
+                    print("GPA Custom Content:", custom_content)
+                    if custom_content.attachments:
+                        result_custom_content.attachments.extend(custom_content.attachments)
+
+                    if custom_content.state:
+                        if not result_custom_content.state:
+                          result_custom_content.state = custom_content.state
+                        else:
+                          print(f"[WARNING] GPA Agent: multiple states in custom content!\nPrevious state: {result_custom_content.state}\nNew state: {custom_content.state}")
+
+                    agent_stages: dict[str, Any] = custom_content.dict(exclude_none=True).get("stages")
+                    if agent_stages:
+                        for stg in agent_stages:
+                            idx = stg["index"]
+                            opened_stg = stages.get(idx)
+                            if not opened_stg:
+                                opened_stg = StageProcessor.open_stage(choice, stg.get("name"))
+                                stages[idx] = opened_stg
+
+                            if stg_content := stg.get("content"):
+                                opened_stg.append_content(stg_content)
+                            elif stg_attachments := stg.get("attachments"):
+                                for stg_attachment in stg_attachments:
+                                    opened_stg.add_attachment(Attachment(**stg_attachment))
+
+        for stg in stages.values():
+            StageProcessor.close_stage_safely(stg)
+        for attachment in result_custom_content.attachments:
+            choice.add_attachment(
+                Attachment(**attachment.dict(exclude_none=True))
+            )
+
+        choice.set_state(
+            {
+                _IS_GPA: True,
+                _GPA_MESSAGES: result_custom_content.state,
+            }
+        )
+        return Message(
+            role=Role.ASSISTANT,
+            content=StrictStr(content),
+        )
 
     def __prepare_gpa_messages(self, request: Request, additional_instructions: Optional[str]) -> list[dict[str, Any]]:
-        #TODO:
         # 1. Create `res_messages` empty array, here we will collect all the messages that are related to the GPA agent
         # 2. Make for i loop through range of len of request messages and:
         #       - if it is assistant message then:
@@ -83,4 +142,31 @@ class GPAGateway:
         # 3. Add last message from `additional_instructions` (it will be user message) as dict with none excluded
         # 4. If `additional_instructions` are present we need to make augmentation for last message content in the `res_messages`
         # 5. Return `res_messages`
-        raise NotImplementedError()
+        res_messages = []
+        for idx in range(len(request.messages)):
+            msg = request.messages[idx]
+            if msg.role == Role.ASSISTANT:
+                if msg.custom_content and msg.custom_content.state:
+                    msg_state = msg.custom_content.state
+                    if msg_state.get(_IS_GPA):
+                        # 1. add user request (user message is always before assistant message)
+                        res_messages.append(request.messages[idx-1].dict(exclude_none=True))
+                        # 2. Copy assistant message
+                        copied_msg = deepcopy(msg)
+                        copied_msg.custom_content.state = msg_state.get(_GPA_MESSAGES)
+                        res_messages.append(copied_msg.dict(exclude_none=True))
+
+        last_user_msg = request.messages[-1]
+        custom_content = last_user_msg.custom_content
+        if additional_instructions:
+            res_messages.append(
+                {
+                    "role": Role.USER,
+                    "content": f"{last_user_msg.content}\n\n{additional_instructions}",
+                    "custom_content": custom_content.dict(exclude_none=True) if custom_content else None,
+                }
+            )
+        else:
+            res_messages.append(last_user_msg.dict(exclude_none=True))
+
+        return res_messages
